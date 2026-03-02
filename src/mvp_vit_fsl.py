@@ -159,6 +159,18 @@ def binary_path(path: torch.Tensor, q: float = 0.85) -> torch.Tensor:
     return (path >= thr).float()
 
 
+def path_branch_score(path: torch.Tensor) -> float:
+    path = path.clamp(min=0)
+    total_mass = float(path.sum().item())
+    if total_mass <= 0:
+        return 0.0
+    row_peak = float(path.max(dim=1).values.sum().item())
+    col_peak = float(path.max(dim=0).values.sum().item())
+    row_branch = max(0.0, (total_mass - row_peak) / (total_mass + 1e-8))
+    col_branch = max(0.0, (total_mass - col_peak) / (total_mass + 1e-8))
+    return 0.5 * (row_branch + col_branch)
+
+
 def normalize_for_vis(matrix: torch.Tensor, power: float = 0.1) -> torch.Tensor:
     matrix = matrix.clamp(min=0)
     matrix = matrix / (matrix.max() + 1e-8)
@@ -360,55 +372,87 @@ def run_eval(
                 total += 1
 
             if epi <= vis_episodes:
-                qf = query_feat[0]
-                qs = query_sigma[0]
-                sf = support_feat[0]
-                ss = support_sigma[0]
+                best = None
+                best_meta = None
 
                 with torch.enable_grad():
-                    d_base = sdtw_obj._calc_distance_matrix(qf.unsqueeze(0), sf.unsqueeze(0))[0]
-                    sigma_xy = sigma_pair_matrix(qs, ss).clamp_min(1e-8)
-                    sigma_inv = sigma_xy.reciprocal()
-                    c_udtw = d_base * sigma_inv
+                    for q_idx in range(query_feat.shape[0]):
+                        same_support = torch.where(episode.support_labels == episode.query_labels[q_idx])[0]
+                        for s_idx in same_support:
+                            qf = query_feat[q_idx]
+                            qs = query_sigma[q_idx]
+                            sf = support_feat[s_idx]
+                            ss = support_sigma[s_idx]
 
-                    a_s_001 = alignment_from_cost_matrix(
-                        cost=d_base.unsqueeze(0),
-                        gamma=0.01,
-                        bandwidth=sdtw_obj.bandwidth,
-                        use_cuda=(device.type == "cuda"),
-                    )[0]
-                    a_s_01 = alignment_from_cost_matrix(
-                        cost=d_base.unsqueeze(0),
-                        gamma=0.1,
-                        bandwidth=sdtw_obj.bandwidth,
-                        use_cuda=(device.type == "cuda"),
-                    )[0]
-                    a_u_001 = alignment_from_cost_matrix(
-                        cost=c_udtw.unsqueeze(0),
-                        gamma=0.01,
-                        bandwidth=sdtw_obj.bandwidth,
-                        use_cuda=(device.type == "cuda"),
-                    )[0]
-                    a_u_01 = alignment_from_cost_matrix(
-                        cost=c_udtw.unsqueeze(0),
-                        gamma=0.1,
-                        bandwidth=udtw_obj.bandwidth,
-                        use_cuda=(device.type == "cuda"),
-                    )[0]
-                    a_u_bin = binary_path(a_u_001)
-                    unc_on_path = a_u_bin * sigma_xy
+                            d_base = sdtw_obj._calc_distance_matrix(qf.unsqueeze(0), sf.unsqueeze(0))[0]
+                            sigma_xy = sigma_pair_matrix(qs, ss).clamp_min(1e-8)
+                            c_udtw = d_base * sigma_xy.reciprocal()
+
+                            a_s_001 = alignment_from_cost_matrix(
+                                cost=d_base.unsqueeze(0),
+                                gamma=0.01,
+                                bandwidth=sdtw_obj.bandwidth,
+                                use_cuda=(device.type == "cuda"),
+                            )[0]
+                            a_s_01 = alignment_from_cost_matrix(
+                                cost=d_base.unsqueeze(0),
+                                gamma=0.1,
+                                bandwidth=sdtw_obj.bandwidth,
+                                use_cuda=(device.type == "cuda"),
+                            )[0]
+                            a_u_001 = alignment_from_cost_matrix(
+                                cost=c_udtw.unsqueeze(0),
+                                gamma=0.01,
+                                bandwidth=sdtw_obj.bandwidth,
+                                use_cuda=(device.type == "cuda"),
+                            )[0]
+                            a_u_01 = alignment_from_cost_matrix(
+                                cost=c_udtw.unsqueeze(0),
+                                gamma=0.1,
+                                bandwidth=udtw_obj.bandwidth,
+                                use_cuda=(device.type == "cuda"),
+                            )[0]
+                            branch = path_branch_score(a_u_01)
+
+                            if best is None or branch > best_meta["branch_score"]:
+                                a_u_bin = binary_path(a_u_001)
+                                unc_on_path = a_u_bin * sigma_xy
+                                best = {
+                                    "a_s_001": a_s_001,
+                                    "a_s_01": a_s_01,
+                                    "a_u_001": a_u_001,
+                                    "a_u_01": a_u_01,
+                                    "unc_on_path": unc_on_path,
+                                }
+                                best_meta = {
+                                    "query_index": int(q_idx),
+                                    "support_index": int(s_idx.item()),
+                                    "label": int(episode.query_labels[q_idx].item()),
+                                    "branch_score": float(branch),
+                                }
+
+                if best is None:
+                    continue
 
                 epi_dir = vis_out / f"episode_{epi:04d}"
-                save_heatmap(a_s_001, epi_dir / "A_sdtw_g001.png", f"Episode {epi} - sDTW gamma=0.01")
-                save_heatmap(a_s_01, epi_dir / "A_sdtw_g01.png", f"Episode {epi} - sDTW gamma=0.1")
-                save_heatmap(a_u_001, epi_dir / "A_udtw_g001.png", f"Episode {epi} - uDTW gamma=0.01")
-                save_heatmap(a_u_01, epi_dir / "A_udtw_g01.png", f"Episode {epi} - uDTW gamma=0.1")
+                save_heatmap(best["a_s_001"], epi_dir / "A_sdtw_g001.png", f"Episode {epi} - sDTW gamma=0.01")
+                save_heatmap(best["a_s_01"], epi_dir / "A_sdtw_g01.png", f"Episode {epi} - sDTW gamma=0.1")
+                save_heatmap(best["a_u_001"], epi_dir / "A_udtw_g001.png", f"Episode {epi} - uDTW gamma=0.01")
+                save_heatmap(best["a_u_01"], epi_dir / "A_udtw_g01.png", f"Episode {epi} - uDTW gamma=0.1")
                 save_heatmap(
-                    unc_on_path,
+                    best["unc_on_path"],
                     epi_dir / "A_udtw_g001_bin_mul_uncertainty.png",
                     f"Episode {epi} - bin(A_udtw gamma=0.01) * Sigma",
                     power=None,
                 )
+                with open(epi_dir / "selected_pair.txt", "w", encoding="utf-8") as f:
+                    f.write(
+                        "selected pair for visualization\n"
+                        f"query_index={best_meta['query_index']}\n"
+                        f"support_index={best_meta['support_index']}\n"
+                        f"label={best_meta['label']}\n"
+                        f"branch_score={best_meta['branch_score']:.6f}\n"
+                    )
 
             if epi % max(1, eval_episodes // 10) == 0:
                 print(

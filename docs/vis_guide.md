@@ -537,3 +537,22 @@ vis = make_udtw_fig2_visualization(
 3. `make_fig2_panels()`
 
 這三個函式直接寫出來。
+
+---
+
+# 13. 為什麼有時候只看到「一條很明顯的路徑」
+
+即使你用的是 soft alignment matrix，也可能因為抽到的 query-support pair 太「容易對齊」，結果視覺上近似單一路徑。  
+這不一定是實作錯，而是 pair selection 的問題。
+
+## 建議做法（已在 `src/mvp_vit_fsl.py` 套用）
+
+1. 不要固定畫 `query[0]` vs `support[0]`
+2. 在同類 pair 裡，先算 `A_udtw(gamma=0.1)`
+3. 計算 path 分叉分數（branch score），例如：
+   * `row_branch = (sum(A) - sum(row_max(A))) / sum(A)`
+   * `col_branch = (sum(A) - sum(col_max(A))) / sum(A)`
+   * `branch_score = 0.5 * (row_branch + col_branch)`
+4. 視覺化 branch score 最高的那組 pair
+
+這樣可以穩定看到「soft path 的多路徑結構」，而不是被單一容易樣本主導。

@@ -81,7 +81,8 @@ def main():
 
     batch_size, len_x, len_y, dims = 1, 30, 30, 10
     a, b = 1.5, 0.5
-    gamma_small, gamma_large = 0.01, 0.1
+    gamma_values = [1.0, 0.1, 0.01, 0.001, 0.0001]
+
     beta_vis = 1.0
     bin_ratio = 0.05
 
@@ -113,41 +114,61 @@ def main():
     print(f"S_udtw shape: {S_udtw.shape}, mean={S_udtw.mean().item():.4f}, std={S_udtw.std().item():.4f}")
     print(f"Sigma_xy shape: {Sigma_xy.shape}, mean={Sigma_xy.mean().item():.4f}, std={Sigma_xy.std().item():.4f}")
 
-    # (a) sDTW, gamma=0.01
-    A_sdtw_001 = get_soft_alignment_from_cost(D_xy, x, y, gamma_small, use_cuda)[0].detach().cpu().numpy()
-    # (b) sDTW, gamma=0.1
-    A_sdtw_01 = get_soft_alignment_from_cost(D_xy, x, y, gamma_large, use_cuda)[0].detach().cpu().numpy()
-    # (c) uDTW, gamma=0.01, path from effective cost C
-    A_udtw_001 = get_soft_alignment_from_cost(D_udtw, x, y, gamma_small, use_cuda)[0].detach().cpu().numpy()
-    # (d) uDTW, gamma=0.1, path from effective cost C
-    A_udtw_01 = get_soft_alignment_from_cost(D_udtw, x, y, gamma_large, use_cuda)[0].detach().cpu().numpy()
+    sdtw_alignments = []
+    udtw_alignments = []
+    uncertainty_maps = []
+    sigma_np = Sigma_xy[0].detach().cpu().numpy()
 
-    # (e) uncertainty-on-path = binarize(c) * Sigma
-    thr = bin_ratio * float(A_udtw_001.max())
-    A_udtw_001_bin = (A_udtw_001 > thr).astype(np.float32)
-    U_on_path = A_udtw_001_bin * Sigma_xy[0].detach().cpu().numpy()
-    U_on_path = U_on_path / (U_on_path.max() + 1e-12)
+    print(f"Testing gammas: {gamma_values}")
+    for gamma in gamma_values:
+        A_sdtw = get_soft_alignment_from_cost(D_xy, x, y, gamma, use_cuda)[0].detach().cpu().numpy()
+        A_udtw = get_soft_alignment_from_cost(D_udtw, x, y, gamma, use_cuda)[0].detach().cpu().numpy()
 
-    panels = [
-        ("(a) sDTW (gamma=0.01)", power_norm_for_vis(A_sdtw_001)),
-        ("(b) sDTW (gamma=0.1)", power_norm_for_vis(A_sdtw_01)),
-        ("(c) uDTW (gamma=0.01)", power_norm_for_vis(A_udtw_001)),
-        ("(d) uDTW (gamma=0.1)", power_norm_for_vis(A_udtw_01)),
-        ("(e) uDTW bin(path) * Sigma", U_on_path),
-    ]
+        thr = bin_ratio * float(A_udtw.max())
+        A_udtw_bin = (A_udtw > thr).astype(np.float32)
+        U_on_path = A_udtw_bin * sigma_np
+        U_on_path = U_on_path / (U_on_path.max() + 1e-12)
 
-    fig, axes = plt.subplots(1, 5, figsize=(22, 4.5))
-    fig.suptitle("Fig.2-style Soft Paths and Uncertainty-on-Path", fontsize=14)
+        sdtw_alignments.append((gamma, A_sdtw))
+        udtw_alignments.append((gamma, A_udtw))
+        uncertainty_maps.append((gamma, U_on_path))
 
-    for ax, (title, mat) in zip(axes, panels):
-        im = ax.imshow(mat, cmap="gray", origin="lower")
-        ax.set_title(title)
-        ax.set_xlabel("Sequence Y")
-        ax.set_ylabel("Sequence X")
-        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        print(
+            f"gamma={gamma:.6f} | "
+            f"sDTW sum={A_sdtw.sum():.4f}, max={A_sdtw.max():.4f} | "
+            f"uDTW sum={A_udtw.sum():.4f}, max={A_udtw.max():.4f}"
+        )
+
+    num_cols = len(gamma_values)
+    fig, axes = plt.subplots(3, num_cols, figsize=(4.2 * num_cols, 10))
+    fig.suptitle("Multi-gamma Soft Paths and Uncertainty-on-Path", fontsize=14)
+
+    if num_cols == 1:
+        axes = np.array(axes).reshape(3, 1)
+
+    for col, ((gamma_s, A_sdtw), (gamma_u, A_udtw), (gamma_unc, U_on_path)) in enumerate(
+        zip(sdtw_alignments, udtw_alignments, uncertainty_maps)
+    ):
+        im1 = axes[0, col].imshow(power_norm_for_vis(A_sdtw), cmap="gray", origin="lower")
+        axes[0, col].set_title(f"sDTW (gamma={gamma_s:g})")
+        axes[0, col].set_xlabel("Sequence Y")
+        axes[0, col].set_ylabel("Sequence X")
+        fig.colorbar(im1, ax=axes[0, col], fraction=0.046, pad=0.04)
+
+        im2 = axes[1, col].imshow(power_norm_for_vis(A_udtw), cmap="gray", origin="lower")
+        axes[1, col].set_title(f"uDTW (gamma={gamma_u:g})")
+        axes[1, col].set_xlabel("Sequence Y")
+        axes[1, col].set_ylabel("Sequence X")
+        fig.colorbar(im2, ax=axes[1, col], fraction=0.046, pad=0.04)
+
+        im3 = axes[2, col].imshow(U_on_path, cmap="gray", origin="lower")
+        axes[2, col].set_title(f"uDTW bin(path)*Sigma (gamma={gamma_unc:g})")
+        axes[2, col].set_xlabel("Sequence Y")
+        axes[2, col].set_ylabel("Sequence X")
+        fig.colorbar(im3, ax=axes[2, col], fraction=0.046, pad=0.04)
 
     plt.tight_layout()
-    save_path = "soft_alignment_matrices_fig2_style.png"
+    save_path = "soft_alignment_multi_gamma.png"
     plt.savefig(save_path, dpi=160)
     print(f"Saved visualization to {save_path}")
     plt.show()

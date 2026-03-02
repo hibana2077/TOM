@@ -10,32 +10,6 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 from sDTW import sDTW
 from uDTW import uDTW
 
-
-def _normalize_nonnegative(mat, eps=1e-12):
-    mat = torch.clamp(mat, min=0.0)
-    denom = mat.sum(dim=(-2, -1), keepdim=True)
-    return mat / (denom + eps)
-
-
-def _extract_udtw_alignment(D_xy, S_xy, func_dtw, gamma, bandwidth, mode='hybrid'):
-    out_xy, outs_xy = func_dtw(D_xy, S_xy, gamma, bandwidth)
-
-    grad_d = torch.autograd.grad(out_xy.sum(), D_xy, retain_graph=True)[0]
-    grad_s = torch.autograd.grad(outs_xy.sum(), S_xy)[0]
-
-    if mode == 'raw':
-        return grad_d
-    if mode == 'positive':
-        return _normalize_nonnegative(grad_d)
-    if mode == 'sigma':
-        return _normalize_nonnegative(grad_s)
-    if mode == 'hybrid':
-        d_norm = _normalize_nonnegative(grad_d)
-        s_norm = _normalize_nonnegative(grad_s)
-        return _normalize_nonnegative(0.7 * d_norm + 0.3 * s_norm)
-
-    raise ValueError(f"Unknown uDTW path mode: {mode}")
-
 def weight_init(m):
     if isinstance(m, nn.Linear):
         nn.init.xavier_normal_(m.weight)
@@ -91,14 +65,12 @@ def main():
     sigma_y_udtw = sigmanet(y, a, b).detach()
 
     gammas = [1.0, 0.1, 0.01, 0.001, 0.0001]
+    out_xy_values = []
+    outs_xy_values = []
     
-    # Try different path extraction modes for uDTW.
-    # options: 'raw', 'positive', 'sigma', 'hybrid'
-    udtw_path_mode = 'hybrid'
-
     # Create the figure
     fig, axes = plt.subplots(2, len(gammas), figsize=(4 * len(gammas), 8))
-    fig.suptitle(f'Soft Alignment Matrices for sDTW and uDTW (uDTW path={udtw_path_mode})', fontsize=16)
+    fig.suptitle('Soft Alignment Matrices for sDTW and uDTW', fontsize=16)
 
     # ==========================
     # 1. Visualize sDTW
@@ -117,7 +89,7 @@ def main():
         align_sdtw = torch.autograd.grad(loss.sum(), D_xy)[0][0].detach().cpu().numpy()
         
         ax = axes[0, i]
-        im = ax.imshow(align_sdtw, cmap='gray', origin='lower')
+        im = ax.imshow(align_sdtw, cmap='viridis', origin='lower')
         ax.set_title(f'sDTW (gamma={g})')
         ax.set_xlabel('Sequence Y')
         ax.set_ylabel('Sequence X')
@@ -135,23 +107,17 @@ def main():
         S_xy = S_xy_raw.detach().requires_grad_(True)
         
         func_dtw = udtw._get_func_dtw(x, y)
-        align_udtw_t = _extract_udtw_alignment(
-            D_xy,
-            S_xy,
-            func_dtw,
-            udtw.gamma,
-            udtw.bandwidth,
-            mode=udtw_path_mode,
-        )
+        out_xy, outs_xy = func_dtw(D_xy, S_xy, udtw.gamma, udtw.bandwidth)
+        total = out_xy.sum() + outs_xy.sum()
 
-        align_udtw = align_udtw_t[0].detach().cpu().numpy()
+        out_xy_values.append(out_xy[0].detach().cpu().item())
+        outs_xy_values.append(outs_xy[0].detach().cpu().item())
 
-        neg_ratio = float((align_udtw < 0).mean())
-        tiny_ratio = float((abs(align_udtw) < 1e-8).mean())
-        print(f"uDTW gamma={g:.4g} | mode={udtw_path_mode} | neg_ratio={neg_ratio:.3f} | tiny_ratio={tiny_ratio:.3f}")
+        # Gradient wrt D_xy is the uDTW soft alignment matrix
+        align_udtw = torch.autograd.grad(total, D_xy)[0][0].detach().cpu().numpy()
         
         ax = axes[1, i]
-        im = ax.imshow(align_udtw, cmap='gray', origin='lower')
+        im = ax.imshow(align_udtw, cmap='viridis', origin='lower')
         ax.set_title(f'uDTW (gamma={g})')
         ax.set_xlabel('Sequence Y')
         ax.set_ylabel('Sequence X')
@@ -162,6 +128,31 @@ def main():
     save_path = 'soft_alignment_matrices.png'
     plt.savefig(save_path)
     print(f"Saved alignment matrix visualization to {save_path}")
+
+    # ==========================
+    # 3. Visualize out_xy and outs_xy
+    # ==========================
+    fig_vals, axes_vals = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes_vals[0].plot(gammas, out_xy_values, marker='o')
+    axes_vals[0].set_xscale('log')
+    axes_vals[0].set_title('uDTW out_xy vs gamma')
+    axes_vals[0].set_xlabel('gamma')
+    axes_vals[0].set_ylabel('out_xy')
+    axes_vals[0].grid(True, which='both', linestyle='--', alpha=0.5)
+
+    axes_vals[1].plot(gammas, outs_xy_values, marker='o', color='tab:orange')
+    axes_vals[1].set_xscale('log')
+    axes_vals[1].set_title('uDTW outs_xy vs gamma')
+    axes_vals[1].set_xlabel('gamma')
+    axes_vals[1].set_ylabel('outs_xy')
+    axes_vals[1].grid(True, which='both', linestyle='--', alpha=0.5)
+
+    plt.tight_layout()
+    save_vals_path = 'udtw_outputs_vs_gamma.png'
+    plt.savefig(save_vals_path)
+    print(f"Saved uDTW outputs visualization to {save_vals_path}")
+
     plt.show()
 
 if __name__ == '__main__':

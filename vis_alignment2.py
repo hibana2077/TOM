@@ -82,6 +82,7 @@ def main():
     batch_size, len_x, len_y, dims = 1, 30, 30, 10
     a, b = 1.5, 0.5
     gamma_values = [1.0, 0.1, 0.01, 0.001, 0.0001]
+    gamma_ref = gamma_values[0]
 
     beta_vis = 1.0
     bin_ratio = 0.05
@@ -98,12 +99,12 @@ def main():
     sigma_y = sigmanet(y, a, b).detach()
 
     # Base sDTW cost D
-    sdtw_ref = sDTW(use_cuda=use_cuda, gamma=gamma_small, normalize=False)
+    sdtw_ref = sDTW(use_cuda=use_cuda, gamma=gamma_ref, normalize=False)
     D_xy = sdtw_ref._calc_distance_matrix(x, y).detach()
 
     # uDTW effective cost C = D \odot Sigma^{-1} (in this codebase this is D_udtw)
     # and uncertainty regularizer term S_udtw = 0.5 * beta * log(sigma_xy)
-    udtw_ref = uDTW(use_cuda=use_cuda, gamma=gamma_small, normalize=False)
+    udtw_ref = uDTW(use_cuda=use_cuda, gamma=gamma_ref, normalize=False)
     D_udtw, S_udtw = udtw_ref._calc_distance_matrix(x, y, sigma_x, sigma_y, beta=beta_vis)
 
     # Build Sigma explicitly for panel (e)

@@ -100,7 +100,7 @@ def main():
         udtw = uDTW(use_cuda=use_cuda, gamma=g, normalize=False)
         
         # Manually compute D_xy and S_xy
-        D_xy_raw, S_xy_raw = udtw._calc_distance_matrix(x, y, sigma_x_udtw, sigma_y_udtw, beta=1.)
+        D_xy_raw, S_xy_raw = udtw._calc_distance_matrix(x, y, sigma_x_udtw, sigma_y_udtw, beta=0.)
         D_xy = D_xy_raw.detach().requires_grad_(True)
         S_xy = S_xy_raw.detach().requires_grad_(True)
         

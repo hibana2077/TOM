@@ -65,8 +65,6 @@ def main():
     sigma_y_udtw = sigmanet(y, a, b).detach()
 
     gammas = [1.0, 0.1, 0.01, 0.001, 0.0001]
-    out_xy_values = []
-    outs_xy_values = []
     
     # Create the figure
     fig, axes = plt.subplots(2, len(gammas), figsize=(4 * len(gammas), 8))
@@ -103,15 +101,15 @@ def main():
         
         # Manually compute D_xy and S_xy
         D_xy_raw, S_xy_raw = udtw._calc_distance_matrix(x, y, sigma_x_udtw, sigma_y_udtw, beta=0.)
+        print(f"uDTW gamma={g} | D_xy_raw shape: {D_xy_raw.shape}, S_xy_raw shape: {S_xy_raw.shape}")
+        print(f"D_xy_raw mean: {D_xy_raw.mean().item():.4f}, std: {D_xy_raw.std().item():.4f}, max: {D_xy_raw.max().item():.4f}, min: {D_xy_raw.min().item():.4f}")
+        print(f"S_xy_raw mean: {S_xy_raw.mean().item():.4f}, std: {S_xy_raw.std().item():.4f}, max: {S_xy_raw.max().item():.4f}, min: {S_xy_raw.min().item():.4f}")
         D_xy = D_xy_raw.detach().requires_grad_(True)
         S_xy = S_xy_raw.detach().requires_grad_(True)
         
         func_dtw = udtw._get_func_dtw(x, y)
         out_xy, outs_xy = func_dtw(D_xy, S_xy, udtw.gamma, udtw.bandwidth)
         total = out_xy.sum() + outs_xy.sum()
-
-        out_xy_values.append(out_xy[0].detach().cpu().item())
-        outs_xy_values.append(outs_xy[0].detach().cpu().item())
 
         # Gradient wrt D_xy is the uDTW soft alignment matrix
         align_udtw = torch.autograd.grad(total, D_xy)[0][0].detach().cpu().numpy()
@@ -128,31 +126,6 @@ def main():
     save_path = 'soft_alignment_matrices.png'
     plt.savefig(save_path)
     print(f"Saved alignment matrix visualization to {save_path}")
-
-    # ==========================
-    # 3. Visualize out_xy and outs_xy
-    # ==========================
-    fig_vals, axes_vals = plt.subplots(1, 2, figsize=(12, 4))
-
-    axes_vals[0].plot(gammas, out_xy_values, marker='o')
-    axes_vals[0].set_xscale('log')
-    axes_vals[0].set_title('uDTW out_xy vs gamma')
-    axes_vals[0].set_xlabel('gamma')
-    axes_vals[0].set_ylabel('out_xy')
-    axes_vals[0].grid(True, which='both', linestyle='--', alpha=0.5)
-
-    axes_vals[1].plot(gammas, outs_xy_values, marker='o', color='tab:orange')
-    axes_vals[1].set_xscale('log')
-    axes_vals[1].set_title('uDTW outs_xy vs gamma')
-    axes_vals[1].set_xlabel('gamma')
-    axes_vals[1].set_ylabel('outs_xy')
-    axes_vals[1].grid(True, which='both', linestyle='--', alpha=0.5)
-
-    plt.tight_layout()
-    save_vals_path = 'udtw_outputs_vs_gamma.png'
-    plt.savefig(save_vals_path)
-    print(f"Saved uDTW outputs visualization to {save_vals_path}")
-
     plt.show()
 
 if __name__ == '__main__':

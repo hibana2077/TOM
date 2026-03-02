@@ -1,5 +1,25 @@
 可以。我先直接把**你要對齊的目標**講清楚：
 
+## 快速使用（已完成腳本）
+
+你可以直接跑根目錄的 `vis_alignment.py` 來畫 sDTW / uDTW 的 soft alignment matrix，
+gamma 會一次產生這 5 組：`1.0, 0.1, 0.01, 0.001, 0.0001`。
+
+執行：
+
+```bash
+python vis_alignment.py
+```
+
+輸出檔案：
+
+- `soft_alignment_matrices.png`
+
+圖的排列：
+
+- 第 1 列：sDTW（5 個 gamma）
+- 第 2 列：uDTW（5 個 gamma）
+
 **論文 Fig. 2 的 (a)–(d) 畫的不是 raw distance matrix，也不是 attention map，也不是 uncertainty matrix 本身；它們畫的是「soft path / soft alignment path matrix」**。而 **(e)** 則是把 **(c) 的 path 圖先二值化，再乘上 uncertainty matrix (\Sigma)**，用來顯示「路徑上哪一段是不確定的」。論文 caption 也明寫了：
 
 * (a)–(d) 是 sDTW / uDTW 的 path

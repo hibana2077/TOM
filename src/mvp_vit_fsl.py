@@ -151,7 +151,7 @@ def extract_patch_tokens(backbone: nn.Module, x: torch.Tensor) -> torch.Tensor:
 def sigma_pair_matrix(sigma_x: torch.Tensor, sigma_y: torch.Tensor) -> torch.Tensor:
     sx = sigma_x.squeeze(-1)
     sy = sigma_y.squeeze(-1)
-    return sx.pow(2).unsqueeze(1) + sy.pow(2).unsqueeze(0)
+    return 0.5 * (sx.pow(2).unsqueeze(1) + sy.pow(2).unsqueeze(0))
 
 
 def binary_path(path: torch.Tensor, q: float = 0.85) -> torch.Tensor:
@@ -159,11 +159,19 @@ def binary_path(path: torch.Tensor, q: float = 0.85) -> torch.Tensor:
     return (path >= thr).float()
 
 
-def save_heatmap(matrix: torch.Tensor, out_file: Path, title: str) -> None:
+def normalize_for_vis(matrix: torch.Tensor, power: float = 0.1) -> torch.Tensor:
+    matrix = matrix.clamp(min=0)
+    matrix = matrix / (matrix.max() + 1e-8)
+    if power is not None:
+        matrix = matrix.pow(power)
+    return matrix
+
+
+def save_heatmap(matrix: torch.Tensor, out_file: Path, title: str, power: float = 0.1) -> None:
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    arr = matrix.detach().cpu().numpy()
+    arr = normalize_for_vis(matrix, power=power).detach().cpu().numpy()
     plt.figure(figsize=(5, 4))
-    plt.imshow(arr, cmap="viridis", aspect="auto")
+    plt.imshow(arr, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
     plt.colorbar()
     plt.title(title)
     plt.tight_layout()
@@ -171,26 +179,11 @@ def save_heatmap(matrix: torch.Tensor, out_file: Path, title: str) -> None:
     plt.close()
 
 
-def alignment_from_sdtw_matrix(D: torch.Tensor, gamma: float, bandwidth: float, use_cuda: bool) -> torch.Tensor:
+def alignment_from_cost_matrix(cost: torch.Tensor, gamma: float, bandwidth: float, use_cuda: bool) -> torch.Tensor:
     func = sdtw_mod._SoftDTWCUDA.apply if use_cuda else sdtw_mod._SoftDTW.apply
-    D = D.clone().requires_grad_(True)
-    out = func(D, gamma, bandwidth)
-    (A,) = torch.autograd.grad(out.sum(), D, create_graph=False)
-    return A.detach()
-
-
-def alignment_from_udtw_matrix(
-    D: torch.Tensor,
-    S: torch.Tensor,
-    gamma: float,
-    bandwidth: float,
-    use_cuda: bool,
-) -> torch.Tensor:
-    func = udtw_mod._SoftDTWCUDA.apply if use_cuda else udtw_mod._SoftDTW.apply
-    D = D.clone().requires_grad_(True)
-    S = S.clone().requires_grad_(False)
-    out_d, _ = func(D, S, gamma, bandwidth)
-    (A,) = torch.autograd.grad(out_d.sum(), D, create_graph=False)
+    cost = cost.clone().requires_grad_(True)
+    out = func(cost, gamma, bandwidth)
+    (A,) = torch.autograd.grad(out.sum(), cost, create_graph=False)
     return A.detach()
 
 
@@ -373,34 +366,48 @@ def run_eval(
                 ss = support_sigma[0]
 
                 with torch.enable_grad():
-                    d_s = sdtw_obj._calc_distance_matrix(qf.unsqueeze(0), sf.unsqueeze(0))
-                    sigma_xy = sigma_pair_matrix(qs, ss)
-                    d_u = ((qf.unsqueeze(1) - sf.unsqueeze(0)) ** 2).sum(-1) / sigma_xy / qf.shape[-1]
-                    s_u = 0.5 * beta * torch.log(sigma_xy.clamp_min(1e-8))
+                    d_base = sdtw_obj._calc_distance_matrix(qf.unsqueeze(0), sf.unsqueeze(0))[0]
+                    sigma_xy = sigma_pair_matrix(qs, ss).clamp_min(1e-8)
+                    sigma_inv = sigma_xy.reciprocal()
+                    c_udtw = d_base * sigma_inv
 
-                    a_s = alignment_from_sdtw_matrix(
-                        D=d_s,
-                        gamma=gamma,
+                    a_s_001 = alignment_from_cost_matrix(
+                        cost=d_base.unsqueeze(0),
+                        gamma=0.01,
                         bandwidth=sdtw_obj.bandwidth,
                         use_cuda=(device.type == "cuda"),
                     )[0]
-                    a_u = alignment_from_udtw_matrix(
-                        D=d_u.unsqueeze(0),
-                        S=s_u.unsqueeze(0),
-                        gamma=gamma,
+                    a_s_01 = alignment_from_cost_matrix(
+                        cost=d_base.unsqueeze(0),
+                        gamma=0.1,
+                        bandwidth=sdtw_obj.bandwidth,
+                        use_cuda=(device.type == "cuda"),
+                    )[0]
+                    a_u_001 = alignment_from_cost_matrix(
+                        cost=c_udtw.unsqueeze(0),
+                        gamma=0.01,
+                        bandwidth=sdtw_obj.bandwidth,
+                        use_cuda=(device.type == "cuda"),
+                    )[0]
+                    a_u_01 = alignment_from_cost_matrix(
+                        cost=c_udtw.unsqueeze(0),
+                        gamma=0.1,
                         bandwidth=udtw_obj.bandwidth,
                         use_cuda=(device.type == "cuda"),
                     )[0]
-                    a_u_bin = binary_path(a_u)
+                    a_u_bin = binary_path(a_u_001)
                     unc_on_path = a_u_bin * sigma_xy
 
                 epi_dir = vis_out / f"episode_{epi:04d}"
-                save_heatmap(a_s, epi_dir / "A_sdtw.png", f"Episode {epi} - A_sdtw")
-                save_heatmap(a_u, epi_dir / "A_udtw.png", f"Episode {epi} - A_udtw")
+                save_heatmap(a_s_001, epi_dir / "A_sdtw_g001.png", f"Episode {epi} - sDTW gamma=0.01")
+                save_heatmap(a_s_01, epi_dir / "A_sdtw_g01.png", f"Episode {epi} - sDTW gamma=0.1")
+                save_heatmap(a_u_001, epi_dir / "A_udtw_g001.png", f"Episode {epi} - uDTW gamma=0.01")
+                save_heatmap(a_u_01, epi_dir / "A_udtw_g01.png", f"Episode {epi} - uDTW gamma=0.1")
                 save_heatmap(
                     unc_on_path,
-                    epi_dir / "A_udtw_bin_mul_uncertainty.png",
-                    f"Episode {epi} - A_udtw_bin * Sigma",
+                    epi_dir / "A_udtw_g001_bin_mul_uncertainty.png",
+                    f"Episode {epi} - bin(A_udtw gamma=0.01) * Sigma",
+                    power=None,
                 )
 
             if epi % max(1, eval_episodes // 10) == 0:

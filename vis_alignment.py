@@ -79,6 +79,8 @@ def main():
         # We need gradients with respect to the distance matrix D_xy
         # So we manually compute D_xy and set requires_grad
         D_xy = sdtw._calc_distance_matrix(x, y).detach().requires_grad_(True)
+        print(f"sDTW gamma={g} | D_xy shape: {D_xy.shape}")
+        print(f"D_xy mean: {D_xy.mean().item():.4f}, std: {D_xy.std().item():.4f}, max: {D_xy.max().item():.4f}, min: {D_xy.min().item():.4f}")
         
         func_dtw = sdtw._get_func_dtw(x, y)
         loss = func_dtw(D_xy, sdtw.gamma, sdtw.bandwidth)

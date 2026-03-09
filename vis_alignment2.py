@@ -12,37 +12,6 @@ from sDTW import sDTW
 from uDTW import uDTW
 
 
-def weight_init(m):
-    if isinstance(m, nn.Linear):
-        nn.init.xavier_normal_(m.weight)
-        nn.init.constant_(m.bias, 0)
-
-
-class Sigmoid(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, a, b, input_tensor):
-        return a * torch.sigmoid(input_tensor) + b
-
-
-class SimpleSigmaNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.fc1 = nn.Linear(10, 20)
-        self.fc2 = nn.Linear(20, 10)
-        self.sigmoid = Sigmoid()
-
-    def forward(self, x, a, b):
-        batch_size = x.shape[0]
-        length = x.shape[1]
-        x = x.view(batch_size * length, -1)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        x = x.view(batch_size, length, -1).mean(2, keepdim=True)
-        return self.sigmoid(a, b, x)
-
-
 def power_norm_for_vis(arr, power=0.1):
     arr = np.maximum(arr, 0.0)
     vmax = float(arr.max())
@@ -64,114 +33,118 @@ def get_soft_alignment_from_cost(cost_matrix, x, y, gamma, use_cuda):
     return align
 
 
-def build_sigma_matrix(sigma_x, sigma_y):
-    # Sigma[m, n] = 0.5 * (sigma_x[m]^2 + sigma_y[n]^2)
-    # sigma_x, sigma_y shape: [B, T, 1]
-    sigma_x2 = sigma_x.pow(2)
-    sigma_y2 = sigma_y.pow(2)
-    sigma_xy = 0.5 * (
-        sigma_x2.expand(-1, -1, sigma_y.shape[1])
-        + sigma_y2.transpose(1, 2).expand(-1, sigma_x.shape[1], -1)
-    )
-    return sigma_xy
+def weight_init(m):
+    if isinstance(m, nn.Linear):
+        nn.init.xavier_normal_(m.weight)
+        nn.init.constant_(m.bias, 0)
+
+
+class Sigmoid(nn.Module):
+    def forward(self, a, b, input_tensor):
+        return a * torch.sigmoid(input_tensor) + b
+
+
+class SimpleSigmaNet(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        hidden_dim = max(2 * input_dim, 8)
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+        self.sigmoid = Sigmoid()
+
+    def forward(self, x, a, b):
+        batch_size, length, _ = x.shape
+        x = x.view(batch_size * length, -1)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        x = x.view(batch_size, length, -1).mean(2, keepdim=True)
+        return self.sigmoid(a, b, x)
+
+
+class sDTWvis:
+    def __init__(self, use_cuda=None):
+        self.use_cuda = torch.cuda.is_available() if use_cuda is None else use_cuda
+
+    def _cost(self, x, y):
+        sdtw = sDTW(use_cuda=self.use_cuda, gamma=1.0, normalize=False)
+        return sdtw._calc_distance_matrix(x, y).detach()
+
+    def alignments(self, x, y, gamma_values):
+        cost = self._cost(x, y)
+        out = []
+        for gamma in gamma_values:
+            A = get_soft_alignment_from_cost(cost, x, y, gamma, self.use_cuda)[0].detach().cpu().numpy()
+            out.append((gamma, A))
+        return out
+
+    def plot(self, x, y, gamma_values, save_path="sdtw_vis.png"):
+        aligns = self.alignments(x, y, gamma_values)
+        fig, axes = plt.subplots(1, len(gamma_values), figsize=(4.2 * len(gamma_values), 3.7))
+        if len(gamma_values) == 1:
+            axes = [axes]
+        for i, (gamma, A) in enumerate(aligns):
+            im = axes[i].imshow(power_norm_for_vis(A), cmap="gray", origin="lower")
+            axes[i].set_title(f"sDTW (gamma={gamma:g})")
+            axes[i].set_xlabel("Y")
+            axes[i].set_ylabel("X")
+            fig.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=160)
+        print(f"Saved: {save_path}")
+
+
+class uDTWvis:
+    def __init__(self, a=1.5, b=0.5, beta=1.0, use_cuda=None):
+        self.a = a
+        self.b = b
+        self.beta = beta
+        self.use_cuda = torch.cuda.is_available() if use_cuda is None else use_cuda
+
+    def _effective_cost(self, x, y):
+        sigmanet = SimpleSigmaNet(input_dim=x.shape[-1]).to(x.device)
+        sigmanet.apply(weight_init)
+        sigma_x = sigmanet(x, self.a, self.b).detach()
+        sigma_y = sigmanet(y, self.a, self.b).detach()
+        udtw = uDTW(use_cuda=self.use_cuda, gamma=1.0, normalize=False)
+        cost, _ = udtw._calc_distance_matrix(x, y, sigma_x, sigma_y, beta=self.beta)
+        return cost.detach()
+
+    def alignments(self, x, y, gamma_values):
+        cost = self._effective_cost(x, y)
+        out = []
+        for gamma in gamma_values:
+            A = get_soft_alignment_from_cost(cost, x, y, gamma, self.use_cuda)[0].detach().cpu().numpy()
+            out.append((gamma, A))
+        return out
+
+    def plot(self, x, y, gamma_values, save_path="udtw_vis.png"):
+        aligns = self.alignments(x, y, gamma_values)
+        fig, axes = plt.subplots(1, len(gamma_values), figsize=(4.2 * len(gamma_values), 3.7))
+        if len(gamma_values) == 1:
+            axes = [axes]
+        for i, (gamma, A) in enumerate(aligns):
+            im = axes[i].imshow(power_norm_for_vis(A), cmap="gray", origin="lower")
+            axes[i].set_title(f"uDTW (gamma={gamma:g})")
+            axes[i].set_xlabel("Y")
+            axes[i].set_ylabel("X")
+            fig.colorbar(im, ax=axes[i], fraction=0.046, pad=0.04)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=160)
+        print(f"Saved: {save_path}")
 
 
 def main():
     torch.manual_seed(42)
-
-    batch_size, len_x, len_y, dims = 1, 30, 30, 10
-    a, b = 1.5, 0.5
-    gamma_values = [1.0, 0.1, 0.01, 0.001, 0.0001]
-    gamma_ref = gamma_values[0]
-
-    beta_vis = 1.0
-    bin_ratio = 0.05
-
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
 
-    x = torch.rand((batch_size, len_x, dims), device=device)
-    y = torch.rand((batch_size, len_y, dims), device=device)
+    x = torch.rand((1, 30, 10), device=device)
+    y = torch.rand((1, 30, 10), device=device)
+    gammas = [1.0, 0.1, 0.01, 0.001, 0.0001]
 
-    sigmanet = SimpleSigmaNet().to(device)
-    sigmanet.apply(weight_init)
-    sigma_x = sigmanet(x, a, b).detach()
-    sigma_y = sigmanet(y, a, b).detach()
+    sDTWvis(use_cuda=use_cuda).plot(x, y, gammas, save_path="sdtw_vis.png")
+    uDTWvis(use_cuda=use_cuda).plot(x, y, gammas, save_path="udtw_vis.png")
 
-    # Base sDTW cost D
-    sdtw_ref = sDTW(use_cuda=use_cuda, gamma=gamma_ref, normalize=False)
-    D_xy = sdtw_ref._calc_distance_matrix(x, y).detach()
-
-    # uDTW effective cost C = D \odot Sigma^{-1} (in this codebase this is D_udtw)
-    # and uncertainty regularizer term S_udtw = 0.5 * beta * log(sigma_xy)
-    udtw_ref = uDTW(use_cuda=use_cuda, gamma=gamma_ref, normalize=False)
-    D_udtw, S_udtw = udtw_ref._calc_distance_matrix(x, y, sigma_x, sigma_y, beta=beta_vis)
-
-    # Build Sigma explicitly for panel (e)
-    Sigma_xy = build_sigma_matrix(sigma_x, sigma_y).detach()
-
-    print(f"D_xy shape: {D_xy.shape}, mean={D_xy.mean().item():.4f}, std={D_xy.std().item():.4f}")
-    print(f"D_udtw shape: {D_udtw.shape}, mean={D_udtw.mean().item():.4f}, std={D_udtw.std().item():.4f}")
-    print(f"S_udtw shape: {S_udtw.shape}, mean={S_udtw.mean().item():.4f}, std={S_udtw.std().item():.4f}")
-    print(f"Sigma_xy shape: {Sigma_xy.shape}, mean={Sigma_xy.mean().item():.4f}, std={Sigma_xy.std().item():.4f}")
-
-    sdtw_alignments = []
-    udtw_alignments = []
-    uncertainty_maps = []
-    sigma_np = Sigma_xy[0].detach().cpu().numpy()
-
-    print(f"Testing gammas: {gamma_values}")
-    for gamma in gamma_values:
-        A_sdtw = get_soft_alignment_from_cost(D_xy, x, y, gamma, use_cuda)[0].detach().cpu().numpy()
-        A_udtw = get_soft_alignment_from_cost(D_udtw, x, y, gamma, use_cuda)[0].detach().cpu().numpy()
-
-        thr = bin_ratio * float(A_udtw.max())
-        A_udtw_bin = (A_udtw > thr).astype(np.float32)
-        U_on_path = A_udtw_bin * sigma_np
-        U_on_path = U_on_path / (U_on_path.max() + 1e-12)
-
-        sdtw_alignments.append((gamma, A_sdtw))
-        udtw_alignments.append((gamma, A_udtw))
-        uncertainty_maps.append((gamma, U_on_path))
-
-        print(
-            f"gamma={gamma:.6f} | "
-            f"sDTW sum={A_sdtw.sum():.4f}, max={A_sdtw.max():.4f} | "
-            f"uDTW sum={A_udtw.sum():.4f}, max={A_udtw.max():.4f}"
-        )
-
-    num_cols = len(gamma_values)
-    fig, axes = plt.subplots(3, num_cols, figsize=(4.2 * num_cols, 10))
-    fig.suptitle("Multi-gamma Soft Paths and Uncertainty-on-Path", fontsize=14)
-
-    if num_cols == 1:
-        axes = np.array(axes).reshape(3, 1)
-
-    for col, ((gamma_s, A_sdtw), (gamma_u, A_udtw), (gamma_unc, U_on_path)) in enumerate(
-        zip(sdtw_alignments, udtw_alignments, uncertainty_maps)
-    ):
-        im1 = axes[0, col].imshow(power_norm_for_vis(A_sdtw), cmap="gray", origin="lower")
-        axes[0, col].set_title(f"sDTW (gamma={gamma_s:g})")
-        axes[0, col].set_xlabel("Sequence Y")
-        axes[0, col].set_ylabel("Sequence X")
-        fig.colorbar(im1, ax=axes[0, col], fraction=0.046, pad=0.04)
-
-        im2 = axes[1, col].imshow(power_norm_for_vis(A_udtw), cmap="gray", origin="lower")
-        axes[1, col].set_title(f"uDTW (gamma={gamma_u:g})")
-        axes[1, col].set_xlabel("Sequence Y")
-        axes[1, col].set_ylabel("Sequence X")
-        fig.colorbar(im2, ax=axes[1, col], fraction=0.046, pad=0.04)
-
-        im3 = axes[2, col].imshow(U_on_path, cmap="gray", origin="lower")
-        axes[2, col].set_title(f"uDTW bin(path)*Sigma (gamma={gamma_unc:g})")
-        axes[2, col].set_xlabel("Sequence Y")
-        axes[2, col].set_ylabel("Sequence X")
-        fig.colorbar(im3, ax=axes[2, col], fraction=0.046, pad=0.04)
-
-    plt.tight_layout()
-    save_path = "soft_alignment_multi_gamma.png"
-    plt.savefig(save_path, dpi=160)
-    print(f"Saved visualization to {save_path}")
     plt.show()
 
 
